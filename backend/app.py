@@ -1,17 +1,23 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS  # type: ignore
-import pandas as pd
 import random
 import re
-from rake_nltk import Rake
 from collections import defaultdict
+from flask import Flask, request, jsonify
+from flask_cors import CORS # type: ignore
+import pandas as pd
+from rake_nltk import Rake
+from textblob import TextBlob
+import spacy # type: ignore
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.model_selection import train_test_split
 import neattext.functions as nfx
 
+# Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS
+CORS(app)
+
+# Load spaCy model
+nlp = spacy.load('en_core_web_sm')
 
 # Load datasets
 songs_df = pd.read_csv('Content_Based_Filtering_T.csv')
@@ -22,7 +28,7 @@ emotion_df['Clean_text'] = emotion_df['Text'].apply(nfx.remove_stopwords)
 emotion_df['Clean_text'] = emotion_df['Clean_text'].apply(nfx.remove_punctuations)
 emotion_df['Clean_text'] = emotion_df['Clean_text'].apply(nfx.remove_userhandles)
 
-# Map emotions for simplicity
+# Simplify emotion categories
 emotion_df['Emotion'] = emotion_df['Emotion'].replace({
     'shame': 'sadness',
     'fear': 'sadness',
@@ -43,6 +49,7 @@ nv_model.fit(X_train, y_train)
 funsong = songs_df[songs_df['Mood'] == 'Fun']['Song Title'].tolist()
 enersong = songs_df[songs_df['Mood'] == 'Energetic']['Song Title'].tolist()
 
+
 # Chatbot Class
 class InteractiveConversationalBot:
     def __init__(self):
@@ -61,51 +68,89 @@ class InteractiveConversationalBot:
             "Can you share more details?",
             "What are your thoughts on this?"
         ]
-        self.greeting_responses = ["What's your name?", "How can I help you today?"]
+
+    def identify_names(self, text):
+        doc = nlp(text)
+        people_names = [ent.text for ent in doc.ents if ent.label_ == "PERSON"]
+        organization_names = [ent.text for ent in doc.ents if ent.label_ == "ORG"]
+        location_names = [ent.text for ent in doc.ents if ent.label_ == "GPE"]
+
+        return {
+            "People Names": list(set(people_names)),
+            "Organization Names": list(set(organization_names)),
+            "Location Names": list(set(location_names))
+        }
 
     def extract_keywords(self, text):
-        # Basic keyword extraction: remove stopwords and simple text processing
-        text = re.sub(r'[^\w\s]', '', text.lower())  # Remove punctuation and lower the case
-        rake = Rake()  # Initialize RAKE
+        rake = Rake()
         rake.extract_keywords_from_text(text)
         keywords = rake.get_ranked_phrases()
-        return keywords
+        return keywords if keywords else []
 
-    def recommend_songs(self, keywords):
-        # Recommend songs based on the extracted keywords
-        recommended_songs = []
-        for keyword in keywords:
-            sampled_songs = songs_df.sample(5)
-            for _, row in sampled_songs.iterrows():
-                song_title = row['Song Title']
-                artist_name = row['Artists']
-                recommended_songs.append(f"{song_title} by {artist_name}")
-        return recommended_songs
+    def generate_followup_question(self, keyword):
+        questions = [
+            f"What do you think about {keyword}?",
+            f"How do you feel about {keyword}?",
+            f"Can you elaborate more on {keyword}?",
+            f"Do you often deal with {keyword}?"
+        ]
+        return random.choice(questions)
+
+    def generate_entity_based_question(self, entities):
+        questions = []
+        if entities["People Names"]:
+            person = random.choice(entities["People Names"])
+            questions.append(f"How do you know {person}?")
+            questions.append(f"Is {person} someone important to you?")
+        if entities["Organization Names"]:
+            org = random.choice(entities["Organization Names"])
+            questions.append(f"Have you worked with {org} before?")
+            questions.append(f"What do you think about {org}?")
+        if entities["Location Names"]:
+            loc = random.choice(entities["Location Names"])
+            questions.append(f"Have you ever visited {loc}?")
+            questions.append(f"What do you like most about {loc}?")
+        return random.choice(questions) if questions else None
+
+    def analyze_sentiment(self, text):
+        blob = TextBlob(text)
+        return blob.sentiment.polarity
+
+    def personalize_response(self, text):
+        sentiment = self.analyze_sentiment(text)
+        if sentiment > 0.5:
+            return "I'm glad to hear that!"
+        elif sentiment < -0.5:
+            return "I'm sorry to hear that. Do you want to talk more about it?"
+        else:
+            return random.choice(self.engagement_questions)
 
     def get_response(self, user_input):
-        # Handle specific commands for ending the chat
         if user_input.lower() in ["bye", "quit", "exit"]:
             return "Thank you for chatting! Goodbye!"
 
-        # Handle greetings
+        # Handle greetings and ask for the user's name
         if user_input.lower() in ["hi", "hello"]:
-            return random.choice(self.greeting_responses)
-        
-        # If the user's name hasn't been set, ask for it
+            return "What's your name?"
         if not self.user_name:
-            self.user_name = user_input
+            self.user_name = user_input  # Capture the user's name
             return f"Nice to meet you, {self.user_name}! What would you like to talk about today?"
-        
-        # Extract keywords and recommend songs
+
+        entities = self.identify_names(user_input)
+        entity_question = self.generate_entity_based_question(entities)
+        if entity_question:
+            return entity_question
+
         keywords = self.extract_keywords(user_input)
         if keywords:
-            recommended_songs = self.recommend_songs(keywords)
-            response = f"I see you're interested in: {', '.join(keywords)}.\nHere are some song recommendations for you:\n"
-            response += '\n'.join(recommended_songs)
-            return response
-        
-        # If no keywords are found, reply with a random engagement response
-        return random.choice(self.default_responses + self.engagement_questions)
+            keyword = random.choice(keywords)
+            if keyword not in self.memory:
+                self.memory[keyword].append(user_input)
+                followup = self.generate_followup_question(keyword)
+                return f"{self.personalize_response(user_input)} {followup}"
+
+        return random.choice(self.default_responses)
+
 
 # Create an instance of the chatbot
 bot = InteractiveConversationalBot()
@@ -113,44 +158,44 @@ bot = InteractiveConversationalBot()
 @app.route('/chat', methods=['POST'])
 def chat():
     user_input = request.json.get('message')
-    
+
     # Generate the chatbot's response
     chatbot_response = bot.get_response(user_input)
-    
+
     # Predict the emotion of the user input
     emotion_prediction = predict_emotion(user_input, nv_model)
-    
-    # Recommend a song based on the predicted emotion
-    song_recommendation = display_song(emotion_prediction)
-    
-    # Send the chatbot's response and song recommendation back to the frontend
+
+    # Recommend songs based on the predicted emotion
+    song_recommendations = recommend_songs(emotion_prediction)
+
+    # Send the chatbot's response and song recommendations back to the frontend
     return jsonify({
         "chatbot_response": chatbot_response,
-        "recommended_songs": [song_recommendation]
+        "recommended_songs": song_recommendations  # Return 3-5 recommended songs
     })
+
 
 def predict_emotion(text, model):
     vect = cv.transform([text]).toarray()
     prediction = model.predict(vect)
-    pred_proba = model.predict_proba(vect)
-    pred_percentage_for_all = dict(zip(model.classes_, pred_proba[0]))
-    return max(pred_percentage_for_all, key=pred_percentage_for_all.get)
+    return prediction[0]
 
-def display_song(emotion):
+
+def recommend_songs(emotion):
     if emotion == 'joy':
-        song = random.choice(funsong)
+        songs = random.sample(funsong, k=min(5, len(funsong)))
     elif emotion == 'sadness':
-        song = random.choice(enersong)
-    elif emotion == 'anger':
-        song = random.choice(funsong)
+        songs = random.sample(enersong, k=min(5, len(enersong)))
     else:
-        song = random.choice(funsong + enersong)
+        songs = random.sample(funsong + enersong, k=min(5, len(funsong + enersong)))
     
-    # Get the artist name for the selected song
-    artist_name = songs_df[songs_df['Song Title'] == song]['Artists'].values[0]
-    return f"{song} by {artist_name}"
+    recommended_songs = []
+    for song in songs:
+        artist_name = songs_df[songs_df['Song Title'] == song]['Artists'].values[0]
+        recommended_songs.append(f"{song} by {artist_name}")
+    
+    return recommended_songs
+
 
 if __name__ == '__main__':
-    port = 5000
-    print(f"Starting server... Server is running on http://127.0.0.1:{port}")
-    app.run(debug=True, port=port)
+    app.run(debug=True, port=5000)
