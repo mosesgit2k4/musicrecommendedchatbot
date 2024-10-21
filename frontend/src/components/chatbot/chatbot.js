@@ -44,7 +44,6 @@ function Chatbot() {
       <div className="chat-column">
         {chatMessages.map((msg, index) => (
           <div key={index} className={`message ${msg.sender}`}>
-            <span>{msg.sender === 'user' ? 'You: ' : 'Bot: '}</span>
             {msg.text}
           </div>
         ))}
